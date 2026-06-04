@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<!--
+  ============================================================
+  イベント タスク整理ツール（ガント＋カレンダー / ブラウザ完結・単一HTML）
+  ------------------------------------------------------------
+  ▼ VS Code での開き方とプレビュー手順（Live Server 拡張）
+   1. このファイルを VS Code で開く
+   2. 拡張機能「Live Server」をインストールしておく
+   3. エディタ右下（または右クリック）の「Go Live」を押すとブラウザで開く
+  ============================================================
+-->
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>イベント タスク・ガント / カレンダー</title>
+
+<!-- 「📷 スクショ」ボタンで画面をPNG画像として保存するために使用。
+     DOM（チャート）を画像化する処理は標準JSだけでは難しいため、軽量ライブラリ html2canvas を
+     CDNから読み込んでいます（オフライン時はこの機能のみ無効になります）。 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+<style>
+/* ============================================================
+   デザイン定義（配色・余白・文字）
+   - 背景は落ち着いた淡色、アクセント（オレンジ赤）は線・文字・バーに使用
+   ============================================================ */
+:root{
+  --ink:#23262b; --ink-soft:#6b7079;
+  --line:#e2ddd4; --line-soft:#eee9e0;
+  --bg:#f1ede5; --panel:#ffffff; --chart-bg:#f5f1e9;
+  --weekend:#e4ddcc; --holiday:#f0d4c4;    /* 土日・祝日（はっきりめ） */
+  --accent:#d8492b; --accent-weak:#f4d9d0;
+  --teal:#127f7f;                          /* 資料提出日・会期マーカー */
+  --lp:#7a45c0;                            /* LP公開日マーカー */
+  --self:#e0612e; --other:#2f74c0;         /* 行の色：自分／他の人 */
+  --self-bg:rgba(224,97,46,.13); --other-bg:rgba(47,116,192,.12);
+  --shadow:0 1px 2px rgba(30,25,20,.06), 0 4px 16px rgba(30,25,20,.05);
+  --row-h:70px; --header-h:54px; --sidebar-w:344px;
+}
+*{box-sizing:border-box;}
+html{height:100%;}
+body{
+  margin:0; height:100vh; display:flex; flex-direction:column; overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+  color:var(--ink); background:var(--bg); font-size:13px; -webkit-font-smoothing:antialiased;
+}
+
+/* ---------- 上部ツールバー ---------- */
+.toolbar{ display:flex; align-items:center; gap:10px; padding:11px 18px; flex:0 0 auto; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+.brand{ display:flex; align-items:baseline; gap:10px; margin-right:8px; }
+.brand h1{ font-size:15px; font-weight:700; letter-spacing:.04em; margin:0; border-left:3px solid var(--accent); padding-left:10px; }
+.brand .sub{ font-size:11px; color:var(--ink-soft); letter-spacing:.04em; }
+button, .btn{ font:inherit; font-size:12px; border:1px solid var(--line); background:var(--panel); color:var(--ink); padding:7px 12px; border-radius:7px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; transition:border-color .12s, background .12s, color .12s; white-space:nowrap; }
+button:hover, .btn:hover{ border-color:var(--ink-soft); }
+button.primary{ border-color:var(--accent); color:var(--accent); font-weight:600; }
+button.primary:hover{ background:var(--accent); color:#fff; }
+select.tb{ font:inherit; font-size:12px; padding:6px 8px; border:1px solid var(--line); border-radius:7px; background:var(--panel); cursor:pointer; }
+.zoom{ display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+.zoom button{ border:none; border-radius:0; padding:7px 11px; }
+.zoom button + button{ border-left:1px solid var(--line); }
+.spacer{ width:1px; height:22px; background:var(--line); margin:0 2px; }
+.toolbar .grow{ flex:1; }
+.tb-label{ font-size:11px; color:var(--ink-soft); }
+.seg{ display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.seg button{ border:none; border-radius:0; padding:7px 14px; color:var(--ink-soft); font-weight:600; }
+.seg button + button{ border-left:1px solid var(--line); }
+.seg button.active{ background:var(--ink); color:#fff; }
+#ganttControls, #calControls{ display:none; align-items:center; gap:10px; }
+body.view-gantt #ganttControls{ display:inline-flex; }
+body.view-calendar #calControls{ display:inline-flex; }
+#ganttView, #calendarView{ display:none; flex:1 1 auto; min-height:0; overflow:auto; }
+body.view-gantt #ganttView{ display:block; }
+body.view-calendar #calendarView{ display:block; }
+
+/* ---------- 凡例 ---------- */
+.legend{ flex:0 0 auto; display:flex; align-items:center; gap:13px; flex-wrap:wrap; padding:6px 18px; background:var(--panel); border-bottom:1px solid var(--line); font-size:11px; color:var(--ink-soft); }
+.legend .lg-title{ font-weight:700; color:var(--ink); }
+.legend .lg-item{ display:inline-flex; align-items:center; gap:5px; }
+.legend .lg-dot{ width:11px; height:11px; border-radius:3px; }
+.legend .lg-sep{ width:1px; height:14px; background:var(--line); }
+
+/* ============================================================
+   ガント表示
+   ============================================================ */
+.grid-scroll{ position:relative; background:var(--chart-bg); }
+.grid-inner{ position:relative; }
+.header{ position:sticky; top:0; z-index:8; display:flex; height:var(--header-h); background:var(--panel); border-bottom:1px solid var(--line); }
+.header-corner{ position:sticky; left:0; z-index:12; width:var(--sidebar-w); flex:0 0 var(--sidebar-w); background:var(--panel); border-right:1px solid var(--line); display:flex; align-items:center; padding:0 14px; font-size:11px; color:var(--ink-soft); letter-spacing:.06em; font-weight:600; }
+.header-dates{ position:relative; }
+.month-row{ display:flex; height:22px; border-bottom:1px solid var(--line-soft); }
+.month-cell{ font-size:11px; font-weight:700; color:var(--ink); padding:3px 8px; letter-spacing:.03em; border-right:1px solid var(--line-soft); white-space:nowrap; overflow:hidden; }
+.day-row{ display:flex; height:32px; }
+.day-cell{ flex:0 0 auto; text-align:center; padding-top:4px; border-right:1px solid var(--line-soft); font-size:11px; line-height:1.2; }
+.day-cell .dnum{ font-weight:600; color:var(--ink); }
+.day-cell .dwk{ font-size:9px; color:var(--ink-soft); }
+.day-cell.sat .dwk{ color:#3a6ea5; }
+.day-cell.sun .dwk, .day-cell.hol .dwk{ color:var(--accent); }
+.day-cell.sat, .day-cell.sun{ background:var(--weekend); }
+.day-cell.hol{ background:var(--holiday); }
+.day-cell.today .dnum{ color:#fff; background:var(--accent); border-radius:10px; padding:0 5px; }
+
+.body{ position:relative; }
+.background-layer{ position:absolute; top:0; bottom:0; z-index:1; pointer-events:none; }
+.stripe{ position:absolute; top:0; bottom:0; }
+.stripe.weekend{ background:var(--weekend); }
+.stripe.holiday{ background:var(--holiday); }
+.today-line{ position:absolute; top:0; bottom:0; width:2px; background:var(--accent); z-index:2; }
+.today-line::before{ content:"今日"; position:absolute; top:2px; left:4px; font-size:9px; color:var(--accent); font-weight:700; white-space:nowrap; }
+.period-band{ position:absolute; top:0; bottom:0; background:rgba(31,138,138,.08); border-left:1px dashed rgba(31,138,138,.5); border-right:1px dashed rgba(31,138,138,.5); z-index:2; }
+.period-band::before{ content:"会期"; position:absolute; top:2px; left:5px; font-size:9px; color:var(--teal); font-weight:700; }
+.submit-line{ position:absolute; top:0; bottom:0; width:2px; background:var(--teal); z-index:2; }
+.submit-line::before{ content:"提出"; position:absolute; top:2px; left:4px; font-size:9px; color:var(--teal); font-weight:700; white-space:nowrap; }
+.lp-line{ position:absolute; top:0; bottom:0; width:2px; background:var(--lp); z-index:2; }
+.lp-line::before{ content:"LP公開"; position:absolute; top:14px; left:4px; font-size:9px; color:var(--lp); font-weight:700; white-space:nowrap; }
+
+.row{ display:flex; height:var(--row-h); border-bottom:1px solid var(--line-soft); }
+.row.self .row-track{ background:var(--self-bg); }
+.row.other .row-track{ background:var(--other-bg); }
+.row.self .row-label{ box-shadow:inset 3px 0 0 var(--self); }
+.row.other .row-label{ box-shadow:inset 3px 0 0 var(--other); }
+.row:hover .row-label{ background:#fcfbf8; }
+.row-label{ position:sticky; left:0; z-index:5; width:var(--sidebar-w); flex:0 0 var(--sidebar-w); background:var(--panel); border-right:1px solid var(--line); display:flex; align-items:center; gap:7px; padding:0 8px 0 12px; }
+.swatch{ width:14px; height:14px; flex:0 0 14px; border-radius:4px; border:1px solid rgba(0,0,0,.15); padding:0; cursor:pointer; overflow:hidden; }
+.swatch::-webkit-color-swatch-wrapper{ padding:0; }
+.swatch::-webkit-color-swatch{ border:none; border-radius:3px; }
+body:not(.cm-individual) .swatch{ display:none; }
+.label-main{ flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.task-name{ font-size:12.5px; font-weight:600; color:var(--ink); border:1px solid transparent; background:transparent; border-radius:4px; padding:1px 4px; width:100%; font-family:inherit; }
+.task-name:focus{ outline:none; border-color:var(--accent); background:#fff; }
+.label-meta{ display:flex; align-items:center; gap:5px; padding:0 4px; }
+.proj-name{ font-size:10.5px; color:var(--ink-soft); border:1px solid transparent; background:transparent; border-radius:4px; padding:0 3px; flex:1; min-width:0; font-family:inherit; }
+.proj-name:focus{ outline:none; border-color:var(--accent); background:#fff; color:var(--ink); }
+.mini-sel{ font-size:11px; color:var(--ink); border:1px solid var(--line-soft); border-radius:6px; padding:2px 5px; background:#fff; font-family:inherit; cursor:pointer; font-weight:600; }
+/* 分類（担当）の色チップ：個別カラー時は色見本に置き換わる */
+.cls-dot{ width:12px; height:12px; flex:0 0 12px; border-radius:4px; border:1px solid rgba(0,0,0,.12); }
+body.cm-individual .cls-dot{ display:none; }
+/* 左一覧で日付を直接選べる入力 */
+.label-dates{ display:flex; align-items:center; gap:4px; padding:0 4px; }
+.mini-date{ font-family:inherit; font-size:10.5px; color:var(--ink); padding:2px 4px; border:1px solid var(--line-soft); border-radius:6px; background:#fff; flex:1; min-width:0; }
+.mini-date:focus{ outline:none; border-color:var(--accent); }
+.d-sep{ font-size:10px; color:var(--ink-soft); flex:0 0 auto; }
+/* 営業日数バッジ（休みを除いた稼働日数） */
+.bizdays{ margin-left:auto; font-size:10px; font-weight:700; color:var(--accent); white-space:nowrap; border:1px solid var(--accent-weak); border-radius:9px; padding:0 7px; }
+.del-btn{ border:none; background:transparent; color:var(--ink-soft); padding:2px 5px; border-radius:5px; cursor:pointer; font-size:13px; line-height:1; }
+.del-btn:hover{ color:var(--accent); background:var(--accent-weak); }
+.row-track{ position:relative; }
+
+.bar{ position:absolute; top:calc((var(--row-h) - 26px)/2); height:26px; border-radius:6px; z-index:3; display:flex; align-items:center; padding:0 9px; cursor:grab; user-select:none; overflow:hidden; box-shadow:0 1px 3px rgba(30,25,20,.18); border:1.5px solid transparent; }
+.bar:active{ cursor:grabbing; }
+.bar .bar-text{ font-size:11.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+.bar.done{ opacity:.55; }
+.bar.todo{ background:transparent !important; }
+.handle{ position:absolute; top:0; bottom:0; width:9px; cursor:ew-resize; z-index:4; }
+.handle.left{ left:0; } .handle.right{ right:0; }
+.handle::after{ content:""; position:absolute; top:50%; transform:translateY(-50%); left:3px; width:2px; height:46%; background:rgba(255,255,255,.65); border-radius:2px; }
+.bar.todo .handle::after{ background:rgba(0,0,0,.25); }
+.empty{ position:absolute; left:var(--sidebar-w); top:60px; right:0; text-align:center; color:var(--ink-soft); font-size:13px; padding:40px; }
+
+/* ============================================================
+   カレンダー表示（2か月を横並び）
+   ============================================================ */
+#calendarView{ padding:18px 22px 40px; }
+.cal-hint{ font-size:11px; color:var(--ink-soft); margin-bottom:12px; }
+.cal-months{ display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start; }
+.cal-grid{ flex:1 1 460px; min-width:430px; max-width:640px; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--panel); box-shadow:var(--shadow); user-select:none; }
+.cal-grid-title{ padding:10px 14px; font-size:14px; font-weight:700; letter-spacing:.03em; border-bottom:1px solid var(--line); }
+.cal-weekdays{ display:grid; grid-template-columns:repeat(7,1fr); border-bottom:1px solid var(--line); }
+.cal-weekdays div{ text-align:center; padding:7px 0; font-size:11px; font-weight:700; color:var(--ink-soft); border-right:1px solid var(--line-soft); letter-spacing:.05em; }
+.cal-weekdays div:last-child{ border-right:none; }
+.cal-weekdays div.sat{ color:#3a6ea5; } .cal-weekdays div.sun{ color:var(--accent); }
+.cal-week{ position:relative; border-bottom:1px solid var(--line); }
+.cal-week:last-child{ border-bottom:none; }
+.cal-cells{ display:grid; grid-template-columns:repeat(7,1fr); }
+.cal-cell{ border-right:1px solid var(--line-soft); padding:5px 7px; position:relative; background:var(--chart-bg); }
+.cal-cell:last-child{ border-right:none; }
+.cal-cell.sat, .cal-cell.sun{ background:var(--weekend); }
+.cal-cell.hol{ background:var(--holiday); }
+.cal-cell.other{ background:#f3f1ec; }
+.cal-cell.other .cal-dnum{ color:#b9b3a8; }
+.cal-cell.in-period{ box-shadow:inset 0 3px 0 rgba(31,138,138,.45); }
+.cal-cell.drop-target{ outline:2px dashed var(--accent); outline-offset:-2px; }
+.cal-dnum{ font-size:12px; font-weight:600; color:var(--ink); }
+.cal-cell.sun .cal-dnum, .cal-cell.hol .cal-dnum{ color:var(--accent); }
+.cal-cell.sat .cal-dnum{ color:#3a6ea5; }
+.cal-cell.today .cal-dnum{ color:#fff; background:var(--accent); border-radius:11px; padding:1px 7px; display:inline-block; min-width:18px; text-align:center; }
+.cal-flags{ position:absolute; top:3px; right:3px; display:flex; flex-direction:column; gap:2px; align-items:flex-end; }
+.cal-flag{ font-size:8.5px; font-weight:700; color:#fff; border-radius:3px; padding:0 4px; }
+.cal-flag.submit{ background:var(--teal); } .cal-flag.lp{ background:var(--lp); }
+.cal-bars{ position:absolute; left:0; right:0; top:24px; pointer-events:none; }
+.cal-bar{ position:absolute; height:18px; border-radius:5px; display:flex; align-items:center; padding:0 7px; font-size:10.5px; font-weight:600; white-space:nowrap; overflow:hidden; box-shadow:0 1px 1px rgba(30,25,20,.12); border:1px solid transparent; pointer-events:auto; cursor:grab; }
+.cal-bar:active{ cursor:grabbing; }
+.cal-bar.cont-l{ border-top-left-radius:0; border-bottom-left-radius:0; }
+.cal-bar.cont-r{ border-top-right-radius:0; border-bottom-right-radius:0; }
+.cal-bar.todo{ background:transparent; }
+.cal-bar.done{ opacity:.55; }
+
+/* ============================================================
+   モーダル
+   ============================================================ */
+.modal-overlay{ display:none; position:fixed; inset:0; z-index:50; background:rgba(35,30,25,.34); align-items:center; justify-content:center; padding:24px; }
+.modal-overlay.open{ display:flex; }
+.modal{ background:var(--panel); border-radius:12px; width:560px; max-width:100%; max-height:86vh; display:flex; flex-direction:column; box-shadow:0 12px 40px rgba(30,25,20,.25); overflow:hidden; }
+.modal-head{ padding:16px 20px; font-size:14px; font-weight:700; letter-spacing:.03em; border-bottom:1px solid var(--line); border-left:3px solid var(--accent); }
+.modal-sub{ font-size:11.5px; color:var(--ink-soft); padding:10px 20px 0; }
+.modal-body{ padding:8px 20px; overflow:auto; }
+.tpl-group{ margin:12px 0; }
+.tpl-group-head{ display:flex; align-items:center; gap:8px; margin-bottom:6px; font-size:12.5px; font-weight:700; }
+.tpl-group-head .pick{ font-size:10px; color:var(--ink-soft); cursor:pointer; margin-left:auto; border:1px solid var(--line); border-radius:6px; padding:2px 7px; }
+.tpl-item{ display:flex; align-items:center; gap:9px; padding:4px 0 4px 12px; }
+.tpl-item label{ display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; }
+.tpl-item .tdot{ width:10px; height:10px; border-radius:3px; flex:0 0 10px; }
+.tpl-item .dur{ margin-left:auto; font-size:10.5px; color:var(--ink-soft); }
+.modal-foot{ display:flex; align-items:center; gap:10px; padding:14px 20px; border-top:1px solid var(--line); }
+.modal-foot label{ font-size:12px; color:var(--ink-soft); display:flex; align-items:center; gap:6px; cursor:pointer; }
+.field-row{ display:flex; align-items:center; gap:10px; padding:8px 0; }
+.field-row label{ width:120px; font-size:12.5px; font-weight:600; }
+.field-row input[type=date]{ font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:7px; }
+.start-choices{ display:flex; flex-direction:column; gap:10px; padding:6px 20px 4px; }
+.start-choices button{ justify-content:flex-start; padding:14px 16px; font-size:13px; }
+.start-choices button b{ font-size:13.5px; }
+.start-choices .desc{ display:block; font-size:11px; color:var(--ink-soft); font-weight:400; margin-top:3px; }
+
+/* スクショ撮影時に編集UIを一時的に隠す（撮影後すぐ解除されます） */
+body.shoot .no-capture{ display:none !important; }
+#fileInput{ display:none; }
+</style>
+</head>
+<body class="view-gantt cm-assignee">
+
+<!-- ============================================================ ツールバー ============================================================ -->
+<div class="toolbar">
+  <div class="brand"><h1>イベント タスク管理</h1><span class="sub">ガント＆カレンダー</span></div>
+
+  <div class="seg">
+    <button id="segGantt" class="active" onclick="switchView('gantt')">ガント</button>
+    <button id="segCal" onclick="switchView('calendar')">カレンダー</button>
+  </div>
+
+  <span id="ganttControls">
+    <div class="zoom no-capture" title="表示の拡大・縮小"><button onclick="changeZoom(-1)">－</button><button onclick="changeZoom(1)">＋</button></div>
+  </span>
+  <span id="calControls">
+    <button onclick="calPrev()">◀ 前月</button><button onclick="calToday()">今月</button><button onclick="calNext()">次月 ▶</button>
+  </span>
+
+  <span class="no-capture" style="display:inline-flex; align-items:center; gap:6px;">
+    <span class="tb-label">バー色</span>
+    <select class="tb" id="colorMode" onchange="setColorMode(this.value)">
+      <option value="assignee">担当ごと</option>
+      <option value="individual">個別カラー</option>
+    </select>
+  </span>
+
+  <span class="grow"></span>
+
+  <div class="no-capture" style="display:flex; gap:9px; align-items:center; flex-wrap:wrap;">
+    <button class="primary" onclick="addTask()">＋ 新規タスク</button>
+    <button onclick="openTpl()">📋 テンプレート挿入</button>
+    <button onclick="openEvt()">🚩 イベント設定</button>
+    <span class="spacer"></span>
+    <button onclick="captureScreenshot()">📷 スクショ</button>
+    <button onclick="exportJSON()">⬇ JSON保存</button>
+    <button onclick="document.getElementById('fileInput').click()">⬆ JSON読込</button>
+  </div>
+  <input type="file" id="fileInput" accept="application/json" onchange="importJSON(event)">
+</div>
+
+<!-- 凡例 -->
+<div class="legend" id="legend"></div>
+
+<!-- ============================================================ ガント表示 ============================================================ -->
+<div class="grid-scroll" id="ganttView">
+  <div class="grid-inner" id="inner">
+    <div class="header"><div class="header-corner">タスク / プロジェクト</div><div class="header-dates" id="headerDates"></div></div>
+    <div class="body" id="body"><div class="background-layer" id="bgLayer"></div></div>
+  </div>
+</div>
+
+<!-- ============================================================ カレンダー表示 ============================================================ -->
+<div id="calendarView">
+  <div class="cal-hint no-capture">当月＋翌月を並べて表示。バーをドラッグすると期間を保ったまま別の日（別の月へも）移動できます。</div>
+  <div class="cal-months" id="calMonths"></div>
+</div>
+
+<!-- ============================================================ テンプレート挿入モーダル ============================================================ -->
+<div class="modal-overlay no-capture" id="tplModal">
+  <div class="modal">
+    <div class="modal-head">テンプレートからタスクを挿入</div>
+    <div class="modal-sub">チェックしたタスクを今日から「営業日」ベースで順に追加します（土日・祝日は自動でスキップ）。</div>
+    <div class="modal-body" id="tplList"></div>
+    <div class="modal-foot">
+      <label><input type="checkbox" id="tplAll" checked onchange="tplToggleAll(this.checked)"> すべて選択</label>
+      <span style="flex:1"></span>
+      <button onclick="closeTpl()">キャンセル</button>
+      <button class="primary" onclick="insertSelectedTemplates()">選択したタスクを挿入</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ イベント設定モーダル ============================================================ -->
+<div class="modal-overlay no-capture" id="evtModal">
+  <div class="modal">
+    <div class="modal-head">イベント設定（会期・提出日・LP公開日）</div>
+    <div class="modal-sub">タスクとは独立した目印です。会期は帯、提出日とLP公開日は縦線でガント／カレンダーに表示されます。</div>
+    <div class="modal-body">
+      <div class="field-row"><label>会期 開始</label><input type="date" id="evtStart"></div>
+      <div class="field-row"><label>会期 終了</label><input type="date" id="evtEnd"></div>
+      <div class="field-row"><label>資料 提出日</label><input type="date" id="evtSubmit"></div>
+      <div class="field-row"><label>LP 公開日</label><input type="date" id="evtLp"></div>
+    </div>
+    <div class="modal-foot">
+      <button onclick="clearEvt()">クリア</button>
+      <span style="flex:1"></span>
+      <button onclick="closeEvt()">閉じる</button>
+      <button class="primary" onclick="applyEvt()">適用</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ 起動時のテンプレート選択 ============================================================ -->
+<div class="modal-overlay no-capture" id="startModal">
+  <div class="modal">
+    <div class="modal-head">テンプレートを選んで開始</div>
+    <div class="modal-sub">よく使うイベント種別のタスクをあらかじめ入れた状態で始められます（あとから「テンプレート挿入」で追加も可能）。</div>
+    <div class="start-choices">
+      <button onclick="startWith(0)"><span><b>展示会で開始</b><span class="desc">ISAT AirTable案・レイアウト・施工図面・訴求・BX依頼 など</span></span></button>
+      <button onclick="startWith(1)"><span><b>協賛イベントで開始</b><span class="desc">AISSA提出→ストボ→各レビュー→取りまとめ→デザイン→LP の流れ</span></span></button>
+      <button onclick="startEmpty()"><span><b>空で開始</b><span class="desc">タスクなしの状態から自分で作る</span></span></button>
+    </div>
+    <div class="modal-foot"><span style="flex:1"></span></div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   0. グローバル設定・状態
+   ============================================================ */
+const SIDEBAR_W = 300;
+const PAD_BEFORE = 5, PAD_AFTER = 16;
+let dayWidth = 38;
+let currentView = "gantt";
+let colorMode = "assignee";              // 'assignee' | 'individual'
+let calMonth = { y:0, m:0 };
+let rangeStart = null, rangeDays = 0;
+
+const PALETTE = ["#4f7cac","#5b9279","#c98a3b","#9a6fb0","#cd5b45","#6b8e9e","#7a8450","#b5687f"];
+
+// 担当ごとの色（バー色・凡例に使用）
+const ASSIGNEE_COLORS = {
+  "自分":"#e0612e", "デザイナー":"#2f74c0", "施工会社":"#4f9d4f",
+  "チームリーダー":"#1f9d91", "マネージャー":"#d9a526", "部長":"#8a4fc0", "その他":"#6b7480",
+};
+const ASSIGNEES = Object.keys(ASSIGNEE_COLORS);
+
+// イベントの目印（タスクとは別管理）
+let eventInfo = { periodStart:"", periodEnd:"", submitDate:"", lpDate:"" };
+
+/* 祝日（2026年・固定リスト。追加は 'YYYY-MM-DD' を足すだけ） */
+const HOLIDAYS_2026 = new Set([
+  "2026-01-01","2026-01-12","2026-02-11","2026-02-23","2026-03-20",
+  "2026-04-29","2026-05-03","2026-05-04","2026-05-05","2026-05-06",
+  "2026-07-20","2026-08-11","2026-09-21","2026-09-22","2026-09-23",
+  "2026-10-12","2026-11-03","2026-11-23",
+]);
+
+/* ============================================================
+   1. 日付計算ユーティリティ（ローカル日付・営業日対応）
+   ============================================================ */
+function parseDate(s){ const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); }
+function formatDate(dt){ const y=dt.getFullYear(),m=String(dt.getMonth()+1).padStart(2,"0"),d=String(dt.getDate()).padStart(2,"0"); return `${y}-${m}-${d}`; }
+function addDays(s,n){ const dt=parseDate(s); dt.setDate(dt.getDate()+n); return formatDate(dt); }
+function daysBetween(a,b){ return Math.round((parseDate(b)-parseDate(a))/86400000); }
+function todayStr(){ return formatDate(new Date()); }
+const WEEKDAYS = ["日","月","火","水","木","金","土"];
+function isWeekend(s){ const w=parseDate(s).getDay(); return w===0||w===6; }
+function isHoliday(s){ return HOLIDAYS_2026.has(s); }
+function isBusinessDay(s){ return !isWeekend(s) && !isHoliday(s); }
+function nextBusinessDay(s){ let d=s; while(!isBusinessDay(d)) d=addDays(d,1); return d; }
+function addBusinessDays(start, dur){ let d=nextBusinessDay(start), c=1; while(c<dur){ d=nextBusinessDay(addDays(d,1)); c++; } return d; }
+// 期間内の営業日数（土日・祝日を除いた日数。開始日・終了日を含む）
+function countBusinessDays(start, end){ let n=0, d=start; while(d<=end){ if(isBusinessDay(d)) n++; d=addDays(d,1); } return n; }
+
+function getDateRange(){
+  const dates=[]; tasks.forEach(t=>{ dates.push(t.start,t.end); });
+  ["periodStart","periodEnd","submitDate","lpDate"].forEach(k=>{ if(eventInfo[k]) dates.push(eventInfo[k]); });
+  dates.push(todayStr());
+  if(dates.length===0) return { start:addDays(todayStr(),-7), days:38 };
+  let min=dates[0], max=dates[0]; dates.forEach(d=>{ if(d<min)min=d; if(d>max)max=d; });
+  const start=addDays(min,-PAD_BEFORE);
+  return { start, days: daysBetween(start,max)+PAD_AFTER };
+}
+
+/* ============================================================
+   2. データ管理
+   ============================================================ */
+let nextId = 1;
+function makeId(){ return "t"+(nextId++); }
+let tasks = [];
+
+function addTask(){
+  const base=todayStr();
+  tasks.push({ id:makeId(), name:"新規タスク", start:base, end:addDays(base,2), project:"未分類", status:"未着手", assignee:"自分", color:ASSIGNEE_COLORS["自分"] });
+  render();
+}
+function deleteTask(id){ tasks=tasks.filter(t=>t.id!==id); render(); }
+function updateTask(id,field,value){ const t=tasks.find(x=>x.id===id); if(t) t[field]=value; }
+
+function exportJSON(){
+  const blob=new Blob([JSON.stringify({eventInfo,tasks},null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download=`gantt_tasks_${todayStr()}.json`; a.click();
+  URL.revokeObjectURL(url);
+}
+function importJSON(ev){
+  const file=ev.target.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const raw=JSON.parse(e.target.result);
+      const arr=Array.isArray(raw)?raw:raw.tasks;
+      if(!Array.isArray(arr)) throw new Error("tasks が見つかりません");
+      if(raw&&raw.eventInfo) eventInfo={ periodStart:raw.eventInfo.periodStart||"", periodEnd:raw.eventInfo.periodEnd||"", submitDate:raw.eventInfo.submitDate||"", lpDate:raw.eventInfo.lpDate||"" };
+      tasks=arr.map(d=>({
+        id:d.id||makeId(), name:d.name??"（無題）",
+        start:d.start||todayStr(), end:d.end||(d.start||todayStr()),
+        project:d.project??"未分類", status:d.status??"未着手",
+        assignee:d.assignee??"自分", color:d.color||ASSIGNEE_COLORS[d.assignee]||PALETTE[0],
+      }));
+      closeStart(); render();
+    }catch(err){ alert("読み込みに失敗しました："+err.message); }
+    ev.target.value="";
+  };
+  reader.readAsText(file);
+}
+
+/* ============================================================
+   2-2. テンプレート（展示会 / 協賛イベント）
+   - dur は営業日。挿入時は今日から営業日ベースで階段状に並べる
+   - assignee で行の色（自分／他の人）とバー色が決まる
+   ============================================================ */
+const PRESETS = [
+  { key:"exhibition", label:"展示会テンプレート", project:"展示会", items:[
+    { name:"【提出】ISAT AirTable案の作成",        dur:3, assignee:"自分" },
+    { name:"【レイアウト】ISAT AirTableレイアウト案の作成", dur:3, assignee:"自分" },
+    { name:"【レイアウト】施工会社レイアウト図面作成",     dur:5, assignee:"施工会社" },
+    { name:"【訴求】訴求作成",                     dur:3, assignee:"自分" },
+    { name:"【デザイン】BX依頼",                   dur:5, assignee:"デザイナー" },
+  ]},
+  { key:"sponsor", label:"協賛イベントテンプレート", project:"協賛イベント", items:[
+    { name:"【提出】AISSA提出",                  dur:2, assignee:"自分" },
+    { name:"【提出】Airtable作成",               dur:2, assignee:"自分" },
+    { name:"【打合せ】登壇者打ち合わせ用 資料作成", dur:3, assignee:"自分" },
+    { name:"【打合せ】登壇者との打ち合わせ",       dur:1, assignee:"自分" },
+    { name:"【ストボ】作成",                     dur:3, assignee:"自分" },
+    { name:"【ストボ】マネージャーレビュー",       dur:1, assignee:"マネージャー" },
+    { name:"【スライド】作成",                   dur:5, assignee:"自分" },
+    { name:"【スライド】チームリーダーレビュー",   dur:1, assignee:"チームリーダー" },
+    { name:"【スライド】マネージャーレビュー",     dur:1, assignee:"マネージャー" },
+    { name:"【スライド】部長レビュー",            dur:1, assignee:"部長" },
+    { name:"【スライド】取りまとめ（トリマテ）",   dur:5, assignee:"自分" },
+    { name:"【デザイン】デザイナー依頼・デザイン作成", dur:5, assignee:"デザイナー" },
+    { name:"【LP】プラポリ社内確認",              dur:2, assignee:"自分" },
+    { name:"【LP】公開日",                       dur:1, assignee:"自分" },
+  ]},
+];
+
+function insertItems(items, project){
+  let cursor=nextBusinessDay(todayStr());
+  items.forEach(it=>{
+    const start=cursor, end=addBusinessDays(start,it.dur);
+    tasks.push({ id:makeId(), name:it.name, start, end, project, status:"未着手", assignee:it.assignee, color:ASSIGNEE_COLORS[it.assignee]||PALETTE[0] });
+    cursor=nextBusinessDay(addDays(end,1));
+  });
+}
+function startWith(idx){ tasks=[]; insertItems(PRESETS[idx].items, PRESETS[idx].project); setInitialMonth(); closeStart(); render(); }
+function startEmpty(){ tasks=[]; setInitialMonth(); closeStart(); render(); }
+function closeStart(){ document.getElementById("startModal").classList.remove("open"); }
+
+function openTpl(){
+  const list=document.getElementById("tplList");
+  list.innerHTML = PRESETS.map((g,gi)=>`
+    <div class="tpl-group">
+      <div class="tpl-group-head">${escapeHtml(g.label)}<span class="pick" onclick="tplPickGroup(${gi})">このテンプレートを全選択</span></div>
+      ${g.items.map((it,ii)=>`
+        <div class="tpl-item">
+          <label>
+            <input type="checkbox" class="tpl-cb" data-g="${gi}" data-i="${ii}" checked>
+            <span class="tdot" style="background:${ASSIGNEE_COLORS[it.assignee]}"></span>
+            ${escapeHtml(it.name)}
+          </label>
+          <span class="dur">${it.dur}営業日 ・ ${escapeHtml(it.assignee)}</span>
+        </div>`).join("")}
+    </div>`).join("");
+  document.getElementById("tplAll").checked=true;
+  document.getElementById("tplModal").classList.add("open");
+}
+function closeTpl(){ document.getElementById("tplModal").classList.remove("open"); }
+function tplToggleAll(on){ document.querySelectorAll(".tpl-cb").forEach(cb=>cb.checked=on); }
+function tplPickGroup(gi){ document.querySelectorAll(`.tpl-cb[data-g="${gi}"]`).forEach(cb=>cb.checked=true); }
+function insertSelectedTemplates(){
+  const checked=[...document.querySelectorAll(".tpl-cb:checked")];
+  if(checked.length===0){ closeTpl(); return; }
+  checked.sort((a,b)=> (a.dataset.g-b.dataset.g)||(a.dataset.i-b.dataset.i));
+  let cursor=nextBusinessDay(todayStr());
+  checked.forEach(cb=>{
+    const g=PRESETS[+cb.dataset.g], it=g.items[+cb.dataset.i];
+    const start=cursor, end=addBusinessDays(start,it.dur);
+    tasks.push({ id:makeId(), name:it.name, start, end, project:g.project, status:"未着手", assignee:it.assignee, color:ASSIGNEE_COLORS[it.assignee]||PALETTE[0] });
+    cursor=nextBusinessDay(addDays(end,1));
+  });
+  closeTpl(); switchView("gantt"); render();
+}
+
+/* ============================================================
+   2-3. イベント設定
+   ============================================================ */
+function openEvt(){
+  document.getElementById("evtStart").value=eventInfo.periodStart;
+  document.getElementById("evtEnd").value=eventInfo.periodEnd;
+  document.getElementById("evtSubmit").value=eventInfo.submitDate;
+  document.getElementById("evtLp").value=eventInfo.lpDate;
+  document.getElementById("evtModal").classList.add("open");
+}
+function closeEvt(){ document.getElementById("evtModal").classList.remove("open"); }
+function applyEvt(){
+  eventInfo.periodStart=document.getElementById("evtStart").value;
+  eventInfo.periodEnd  =document.getElementById("evtEnd").value;
+  eventInfo.submitDate =document.getElementById("evtSubmit").value;
+  eventInfo.lpDate     =document.getElementById("evtLp").value;
+  closeEvt(); render();
+}
+function clearEvt(){ eventInfo={periodStart:"",periodEnd:"",submitDate:"",lpDate:""}; ["evtStart","evtEnd","evtSubmit","evtLp"].forEach(id=>document.getElementById(id).value=""); render(); }
+
+/* ============================================================
+   3. 共通ユーティリティ・凡例
+   ============================================================ */
+function hexToRgba(hex,a){ const n=hex.replace("#",""); const r=parseInt(n.substr(0,2),16),g=parseInt(n.substr(2,2),16),b=parseInt(n.substr(4,2),16); return `rgba(${r},${g},${b},${a})`; }
+function escapeHtml(s){ return String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function escapeAttr(s){ return String(s).replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
+function isSelf(task){ return task.assignee==="自分"; }
+
+// バーの色（担当ごと or 個別）
+function taskColor(task){ return colorMode==="assignee" ? (ASSIGNEE_COLORS[task.assignee]||"#888") : (task.color||"#888"); }
+function styleBar(el,task){
+  // バーは担当（または個別）の色で塗りつぶし。境界はやや濃いめにしてクッキリ見せる
+  const c=taskColor(task);
+  el.style.background=c; el.style.borderColor=hexToRgba(c,.0); el.style.color="#fff";
+}
+function renderLegend(){
+  const el=document.getElementById("legend");
+  let html = `<span class="lg-title">行の色</span>`
+    + `<span class="lg-item"><span class="lg-dot" style="background:var(--self)"></span>自分</span>`
+    + `<span class="lg-item"><span class="lg-dot" style="background:var(--other)"></span>他の人</span>`
+    + `<span class="lg-sep"></span>`;
+  if(colorMode==="assignee"){
+    const present=new Set(tasks.map(t=>t.assignee));
+    const keys=ASSIGNEES.filter(k=>present.has(k));
+    html += `<span class="lg-title">バー：担当</span>` + (keys.length? keys.map(k=>`<span class="lg-item"><span class="lg-dot" style="background:${ASSIGNEE_COLORS[k]}"></span>${escapeHtml(k)}</span>`).join("") : `<span>（タスクなし）</span>`);
+  }else{
+    html += `<span class="lg-title">バー：個別カラー</span><span>各タスクの色見本で設定</span>`;
+  }
+  el.innerHTML = html;
+}
+
+/* ============================================================
+   4. ガント描画
+   ============================================================ */
+function renderHeader(){
+  const head=document.getElementById("headerDates"); head.style.width=(rangeDays*dayWidth)+"px";
+  let monthHTML='<div class="month-row">', i=0;
+  while(i<rangeDays){
+    const d=parseDate(addDays(rangeStart,i)), y=d.getFullYear(), m=d.getMonth(); let span=0;
+    while(i+span<rangeDays){ const dd=parseDate(addDays(rangeStart,i+span)); if(dd.getFullYear()!==y||dd.getMonth()!==m) break; span++; }
+    monthHTML+=`<div class="month-cell" style="width:${span*dayWidth}px">${y}年 ${m+1}月</div>`; i+=span;
+  }
+  monthHTML+='</div>';
+  let dayHTML='<div class="day-row">'; const today=todayStr();
+  for(let j=0;j<rangeDays;j++){
+    const ds=addDays(rangeStart,j), d=parseDate(ds), wk=d.getDay(); let cls="day-cell";
+    if(isHoliday(ds))cls+=" hol"; else if(wk===6)cls+=" sat"; else if(wk===0)cls+=" sun";
+    if(ds===today)cls+=" today";
+    dayHTML+=`<div class="${cls}" style="width:${dayWidth}px"><div class="dnum">${d.getDate()}</div><div class="dwk">${WEEKDAYS[wk]}</div></div>`;
+  }
+  dayHTML+='</div>'; head.innerHTML=monthHTML+dayHTML;
+}
+function renderBackground(){
+  const layer=document.getElementById("bgLayer"); const tracksW=rangeDays*dayWidth;
+  layer.style.left=SIDEBAR_W+"px"; layer.style.width=tracksW+"px";
+  let html=""; const today=todayStr();
+  for(let j=0;j<rangeDays;j++){
+    const ds=addDays(rangeStart,j), left=j*dayWidth;
+    if(isHoliday(ds))      html+=`<div class="stripe holiday" style="left:${left}px;width:${dayWidth}px"></div>`;
+    else if(isWeekend(ds)) html+=`<div class="stripe weekend" style="left:${left}px;width:${dayWidth}px"></div>`;
+  }
+  if(eventInfo.periodStart&&eventInfo.periodEnd){
+    const ps=daysBetween(rangeStart,eventInfo.periodStart), pe=daysBetween(rangeStart,eventInfo.periodEnd);
+    html+=`<div class="period-band" style="left:${ps*dayWidth}px;width:${(pe-ps+1)*dayWidth}px"></div>`;
+  }
+  const ti=daysBetween(rangeStart,today);
+  if(ti>=0&&ti<rangeDays) html+=`<div class="today-line" style="left:${ti*dayWidth}px"></div>`;
+  if(eventInfo.submitDate){ const si=daysBetween(rangeStart,eventInfo.submitDate); if(si>=0&&si<rangeDays) html+=`<div class="submit-line" style="left:${si*dayWidth}px"></div>`; }
+  if(eventInfo.lpDate){ const li=daysBetween(rangeStart,eventInfo.lpDate); if(li>=0&&li<rangeDays) html+=`<div class="lp-line" style="left:${li*dayWidth}px"></div>`; }
+  layer.innerHTML=html;
+}
+function positionBar(bar,task){
+  const left=daysBetween(rangeStart,task.start)*dayWidth, width=(daysBetween(task.start,task.end)+1)*dayWidth;
+  bar.style.left=left+"px"; bar.style.width=Math.max(width,dayWidth*0.6)+"px";
+}
+function renderRows(){
+  const body=document.getElementById("body");
+  [...body.querySelectorAll(".row")].forEach(r=>r.remove());
+  const tracksW=rangeDays*dayWidth;
+  tasks.forEach(task=>{
+    const row=document.createElement("div"); row.className="row "+(isSelf(task)?"self":"other");  // 行の色＝自分/他の人
+    const label=document.createElement("div"); label.className="row-label";
+    label.innerHTML=`
+      <input type="color" class="swatch" value="${task.color}" title="個別カラー">
+      <span class="cls-dot" style="background:${taskColor(task)}" title="担当の色"></span>
+      <div class="label-main">
+        <input class="task-name" value="${escapeAttr(task.name)}" placeholder="タスク名">
+        <div class="label-meta">
+          <select class="mini-sel asg" title="担当">${ASSIGNEES.map(a=>`<option ${a===task.assignee?"selected":""}>${a}</option>`).join("")}</select>
+          <span class="bizdays" title="土日・祝日を除いた営業日数">${countBusinessDays(task.start,task.end)}営業日</span>
+        </div>
+        <div class="label-dates">
+          <input type="date" class="mini-date d-start" value="${task.start}" title="開始日">
+          <span class="d-sep">〜</span>
+          <input type="date" class="mini-date d-end" value="${task.end}" title="終了日">
+        </div>
+      </div>
+      <button class="del-btn no-capture" title="削除">✕</button>`;
+    label.querySelector(".swatch").addEventListener("input", e=>{ updateTask(task.id,"color",e.target.value); render(); });
+    label.querySelector(".task-name").addEventListener("input", e=>{ updateTask(task.id,"name",e.target.value); syncBarText(task.id,e.target.value); });
+    label.querySelector(".asg").addEventListener("change", e=>{ updateTask(task.id,"assignee",e.target.value); render(); }); // 担当変更→行色も更新
+    // 左一覧の日付入力（開始 > 終了 にならないよう自動補正）
+    label.querySelector(".d-start").addEventListener("change", e=>{ let v=e.target.value; if(!v) return; if(v>task.end) task.end=v; task.start=v; render(); });
+    label.querySelector(".d-end").addEventListener("change", e=>{ let v=e.target.value; if(!v) return; if(v<task.start) task.start=v; task.end=v; render(); });
+    label.querySelector(".del-btn").addEventListener("click", ()=>deleteTask(task.id));
+
+    const track=document.createElement("div"); track.className="row-track"; track.style.width=tracksW+"px";
+    const bar=document.createElement("div"); bar.className="bar"; bar.dataset.id=task.id;
+    bar.innerHTML=`<div class="handle left no-capture"></div><span class="bar-text">${escapeHtml(task.name)}</span><div class="handle right no-capture"></div>`;
+    styleBar(bar,task); positionBar(bar,task); attachDrag(bar,task);
+    track.appendChild(bar); row.appendChild(label); row.appendChild(track); body.appendChild(row);
+  });
+  let empty=document.querySelector(".empty");
+  if(tasks.length===0){ if(!empty){ empty=document.createElement("div"); empty.className="empty"; empty.textContent="「＋ 新規タスク」または「📋 テンプレート挿入」でタスクを追加してください。"; document.getElementById("inner").appendChild(empty); } }
+  else if(empty){ empty.remove(); }
+}
+function syncBarText(id,text){ const b=document.querySelector(`.bar[data-id="${id}"] .bar-text`); if(b) b.textContent=text; }
+function renderGantt(){
+  const r=getDateRange(); rangeStart=r.start; rangeDays=r.days;
+  document.getElementById("inner").style.width=(SIDEBAR_W+rangeDays*dayWidth)+"px";
+  renderHeader(); renderBackground(); renderRows();
+}
+
+/* ============================================================
+   5. ガントのドラッグ
+   ============================================================ */
+function attachDrag(bar,task){
+  const L=bar.querySelector(".handle.left"), R=bar.querySelector(".handle.right");
+  bar.addEventListener("mousedown", e=>{ if(e.target===L||e.target===R) return; startDrag(e,task,"move"); });
+  L.addEventListener("mousedown", e=>{ e.stopPropagation(); startDrag(e,task,"left"); });
+  R.addEventListener("mousedown", e=>{ e.stopPropagation(); startDrag(e,task,"right"); });
+}
+function startDrag(e,task,mode){
+  e.preventDefault();
+  const startX=e.clientX, origStart=task.start, origEnd=task.end;
+  document.body.style.userSelect="none";
+  const bar=document.querySelector(`.bar[data-id="${task.id}"]`);
+  function onMove(ev){
+    const dd=Math.round((ev.clientX-startX)/dayWidth);
+    if(mode==="move"){ task.start=addDays(origStart,dd); task.end=addDays(origEnd,dd); }
+    else if(mode==="left"){ let ns=addDays(origStart,dd); if(daysBetween(ns,origEnd)<0) ns=origEnd; task.start=ns; }
+    else if(mode==="right"){ let ne=addDays(origEnd,dd); if(daysBetween(origStart,ne)<0) ne=origStart; task.end=ne; }
+    positionBar(bar,task);
+    const row=bar.closest(".row"); const ds=row.querySelector(".d-start"), de=row.querySelector(".d-end");
+    if(ds) ds.value=task.start; if(de) de.value=task.end;   // 左一覧の日付入力もドラッグに追従
+    const bd=row.querySelector(".bizdays"); if(bd) bd.textContent=countBusinessDays(task.start,task.end)+"営業日";
+  }
+  function onUp(){ document.removeEventListener("mousemove",onMove); document.removeEventListener("mouseup",onUp); document.body.style.userSelect=""; render(); }
+  document.addEventListener("mousemove",onMove); document.addEventListener("mouseup",onUp);
+}
+
+/* ============================================================
+   6. カレンダー描画（当月＋翌月を横並び）
+   ============================================================ */
+function renderCalendar(){
+  const wrap=document.getElementById("calMonths");
+  let y1=calMonth.y,m1=calMonth.m,y2=calMonth.y,m2=calMonth.m+1; if(m2>11){ m2=0; y2++; }
+  wrap.innerHTML = buildMonthGrid(y1,m1) + buildMonthGrid(y2,m2);
+  wrap.querySelectorAll(".cal-bar").forEach(el=>{ const task=tasks.find(t=>t.id===el.dataset.id); if(task){ styleBar(el,task); attachCalDrag(el,task); } });
+}
+function buildMonthGrid(y,m){
+  const first=new Date(y,m,1);
+  const gridStart=addDays(formatDate(first), -first.getDay());
+  const last=new Date(y,m+1,0);
+  const gridEnd=addDays(formatDate(last), 6-last.getDay());
+  const weeks=(daysBetween(gridStart,gridEnd)+1)/7; const today=todayStr();
+  let html=`<div class="cal-grid"><div class="cal-grid-title">${y}年 ${m+1}月</div>`;
+  html+='<div class="cal-weekdays">'+WEEKDAYS.map((w,i)=>`<div class="${i===0?'sun':i===6?'sat':''}">${w}</div>`).join("")+'</div>';
+  for(let w=0;w<weeks;w++){
+    const weekStart=addDays(gridStart,w*7), weekEnd=addDays(weekStart,6);
+    const overlap=tasks.filter(t=> t.start<=weekEnd && t.end>=weekStart)
+      .sort((a,b)=> a.start<b.start?-1 : a.start>b.start?1 : daysBetween(b.start,b.end)-daysBetween(a.start,a.end));
+    const laneEnd=[], placed=[];
+    overlap.forEach(t=>{
+      const cs=Math.max(0,daysBetween(weekStart,t.start)), ce=Math.min(6,daysBetween(weekStart,t.end));
+      let lane=0; while(laneEnd[lane]!==undefined && laneEnd[lane]>=cs) lane++;
+      laneEnd[lane]=ce; placed.push({t,cs,ce,lane});
+    });
+    const cellH=26 + laneEnd.length*20 + 6;
+    let cells='<div class="cal-cells">';
+    for(let d=0;d<7;d++){
+      const ds=addDays(weekStart,d), dt=parseDate(ds), wk=dt.getDay(); let cls="cal-cell";
+      if(dt.getMonth()!==m) cls+=" other";
+      if(isHoliday(ds))cls+=" hol"; else if(wk===6)cls+=" sat"; else if(wk===0)cls+=" sun";
+      if(ds===today)cls+=" today";
+      if(eventInfo.periodStart&&eventInfo.periodEnd&&ds>=eventInfo.periodStart&&ds<=eventInfo.periodEnd) cls+=" in-period";
+      let flags=""; if(ds===eventInfo.submitDate) flags+='<span class="cal-flag submit">提出</span>'; if(ds===eventInfo.lpDate) flags+='<span class="cal-flag lp">LP</span>';
+      const flagsHTML = flags? `<div class="cal-flags">${flags}</div>` : "";
+      cells+=`<div class="${cls}" data-date="${ds}" style="min-height:${cellH}px"><span class="cal-dnum">${dt.getDate()}</span>${flagsHTML}</div>`;
+    }
+    cells+='</div>';
+    let bars='<div class="cal-bars">';
+    placed.forEach(p=>{
+      const leftPct=p.cs/7*100, widthPct=(p.ce-p.cs+1)/7*100, top=p.lane*20; let cls="cal-bar";
+      if(p.t.start<weekStart) cls+=" cont-l"; if(p.t.end>weekEnd) cls+=" cont-r";
+      bars+=`<div class="${cls}" data-id="${p.t.id}" style="left:calc(${leftPct}% + 4px); width:calc(${widthPct}% - 8px); top:${top}px"><span style="pointer-events:none">${escapeHtml(p.t.name)}</span></div>`;
+    });
+    bars+='</div>';
+    html+=`<div class="cal-week">${cells}${bars}</div>`;
+  }
+  html+='</div>'; return html;
+}
+function attachCalDrag(el,task){
+  el.addEventListener("mousedown", e=>{
+    e.preventDefault(); e.stopPropagation();
+    const origStart=task.start, origEnd=task.end;
+    el.style.pointerEvents="none";                    // ★先にバーを透過させ、掴んだ日を取得（ドラッグ移動の修正点）
+    const grabDate=cellDateAt(e.clientX,e.clientY);
+    document.body.style.userSelect="none";
+    let lastTarget=null, moved=false;
+    function onMove(ev){
+      moved=true; const cell=cellElAt(ev.clientX,ev.clientY);
+      if(lastTarget&&lastTarget!==cell) lastTarget.classList.remove("drop-target");
+      if(cell){ cell.classList.add("drop-target"); lastTarget=cell; }
+    }
+    function onUp(ev){
+      document.removeEventListener("mousemove",onMove); document.removeEventListener("mouseup",onUp);
+      el.style.pointerEvents=""; document.body.style.userSelect="";
+      if(lastTarget) lastTarget.classList.remove("drop-target");
+      const dropDate=cellDateAt(ev.clientX,ev.clientY);
+      if(moved&&grabDate&&dropDate){ const delta=daysBetween(grabDate,dropDate); if(delta!==0){ task.start=addDays(origStart,delta); task.end=addDays(origEnd,delta); } }
+      render();
+    }
+    document.addEventListener("mousemove",onMove); document.addEventListener("mouseup",onUp);
+  });
+}
+function cellElAt(x,y){ let el=document.elementFromPoint(x,y); while(el && !(el.classList&&el.classList.contains("cal-cell"))) el=el.parentElement; return el; }
+function cellDateAt(x,y){ const c=cellElAt(x,y); return c? c.dataset.date : null; }
+
+/* ============================================================
+   7. 表示切替・色分け・ズーム・スクショ
+   ============================================================ */
+function render(){ renderLegend(); if(currentView==="gantt") renderGantt(); else renderCalendar(); }
+function switchView(v){
+  currentView=v;
+  document.body.classList.toggle("view-gantt", v==="gantt");
+  document.body.classList.toggle("view-calendar", v==="calendar");
+  document.getElementById("segGantt").classList.toggle("active", v==="gantt");
+  document.getElementById("segCal").classList.toggle("active", v==="calendar");
+  render();
+}
+function setColorMode(v){ colorMode=v; document.body.classList.remove("cm-assignee","cm-individual"); document.body.classList.add("cm-"+v); render(); }
+function changeZoom(dir){ dayWidth=Math.min(80,Math.max(16,dayWidth+dir*6)); render(); }
+function calPrev(){ calMonth.m--; if(calMonth.m<0){ calMonth.m=11; calMonth.y--; } render(); }
+function calNext(){ calMonth.m++; if(calMonth.m>11){ calMonth.m=0; calMonth.y++; } render(); }
+function calToday(){ const d=new Date(); calMonth={y:d.getFullYear(),m:d.getMonth()}; render(); }
+
+// 「📷 スクショ」：現在のビュー（チャート全体）をPNG画像として保存。撮影後すぐ通常表示に戻る
+function captureScreenshot(){
+  if(typeof html2canvas==="undefined"){ alert("スクショ機能を読み込めませんでした（オンライン環境で開き直してください）。"); return; }
+  const target = currentView==="gantt" ? document.getElementById("inner") : document.getElementById("calMonths");
+  document.body.classList.add("shoot");                 // 編集UIを一時的に隠す
+  requestAnimationFrame(()=> setTimeout(()=>{
+    html2canvas(target, { backgroundColor:"#f5f1e9", scale:2 })
+      .then(canvas=>{
+        canvas.toBlob(blob=>{
+          const url=URL.createObjectURL(blob);
+          const a=document.createElement("a"); a.href=url; a.download=`gantt_${currentView}_${todayStr()}.png`; a.click();
+          URL.revokeObjectURL(url);
+        });
+      })
+      .catch(err=>alert("スクショに失敗しました："+err.message))
+      .finally(()=> document.body.classList.remove("shoot"));  // 自動で元に戻す
+  }, 60));
+}
+
+function setInitialMonth(){
+  const base=tasks.length ? tasks.reduce((m,t)=> t.start<m?t.start:m, tasks[0].start) : todayStr();
+  const bd=parseDate(base); calMonth={y:bd.getFullYear(),m:bd.getMonth()};
+}
+
+/* ============================================================
+   8. 初期化
+   ============================================================ */
+(function init(){
+  setInitialMonth(); setColorMode("assignee"); render();
+  document.getElementById("startModal").classList.add("open");
+})();
+</script>
+</body>
+</html>
